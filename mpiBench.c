@@ -112,14 +112,14 @@ Globals
 #define ALLTOALLV  (0x100)
 #define ALLGATHERV (0x200)
 #define GATHERV    (0x400)
-#define IALLTOALLV (0x500)
+#define IALLTOALLV (0x800)
 #define NUM_TESTS  (12)
 
 char* TEST_NAMES[] = {
   "Barrier", "Bcast", "Alltoall", "Allgather", "Gather", "Scatter", "Allreduce", "Reduce", "Alltoallv", "Allgatherv", "Gatherv", "Ialltoallv",
 };
 int   TEST_FLAGS[] = {
-   BARRIER,   BCAST,   ALLTOALL,   ALLGATHER,   GATHER,   SCATTER,   ALLREDUCE,   REDUCE,   ALLTOALLV,   ALLGATHERV,   GATHERV, IALLTOALLV,
+   BARRIER,   BCAST,   ALLTOALL,   ALLGATHER,   GATHER,   SCATTER,   ALLREDUCE,   REDUCE,   ALLTOALLV,   ALLGATHERV,   GATHERV,   IALLTOALLV,
 };
   
 int rank_local; /* my MPI rank */
@@ -353,7 +353,7 @@ int processArgs(int argc, char **argv, struct argList* args)
   args->messStop   = (size_t) MSG_SIZE_STOP;
   args->memLimit   = (size_t) MAX_PROC_MEM;
   args->timeLimit  = 0;
-  args->testFlags  = 0x1FFF;
+  args->testFlags  = 0x3FFF;
   args->checkOnce  = 0;
   args->checkEvery = 0;
   args->ndims      = 0;
@@ -441,7 +441,7 @@ int processArgs(int argc, char **argv, struct argList* args)
        if user doesn't specify any, all will be run */
     for(j=0; j<NUM_TESTS; j++) {
       if(!strcasecmp(TEST_NAMES[j], argv[i])) {
-        if(args->testFlags == 0x1FFF) args->testFlags = 0;
+        if(args->testFlags == 0x3FFF) args->testFlags = 0;
         args->testFlags |= TEST_FLAGS[j];
       }
     }
@@ -685,13 +685,12 @@ double time_ialltoallv(struct collParams* p)
         for (op = 0; op < p->max_concurrent_ops; op++) {
             char *sbuf = (char*)((ptrdiff_t)send_mem_chunk + buffer_size * op);
             char *rbuf = (char*)((ptrdiff_t)recv_mem_chunk + buffer_size * op);
-            MPI_Request req = requests[op];
             if (check) {
                 init_sbuffer(sbuf, p->myrank, op);
                 init_rbuffer(rbuf, p->myrank);
             }
 
-            MPI_Ialltoallv(sbuf, sendcounts, sdispls, p->type, rbuf, recvcounts, rdispls, p->type, p->comm, &req);
+            MPI_Ialltoallv(sbuf, sendcounts, sdispls, p->type, rbuf, recvcounts, rdispls, p->type, p->comm, &requests[op]);
         }
 
         MPI_Waitall(p->max_concurrent_ops, requests, statuses);
@@ -1156,7 +1155,7 @@ int main (int argc, char *argv[])
         if(testFlags & IALLTOALLV) {
             for(p.size = messStart; p.size <= messStop; p.size = (p.size > 0) ? p.size << 1 : 1) {
                 p.count = p.size;
-                if(get_time(time_alltoallv, "Ialltoallv", &p, iter, time_limit) > time_maxMsg && time_maxMsg > 0.0) break;
+                if(get_time(time_ialltoallv, "Ialltoallv", &p, iter, time_limit) > time_maxMsg && time_maxMsg > 0.0) break;
             }
         }
 
