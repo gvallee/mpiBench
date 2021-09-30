@@ -697,11 +697,15 @@ double time_ialltoallv(struct collParams* p)
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(sbuffer, p->myrank, op);
-            for (k = 0; k < p->nranks; k++) {
-                disp = 0;
-                for (j = 0; j < p->myrank; j++) { disp += ((j+k)*chunksize) % (p->size+1); }
-                check_rbuffer(rbuffer, rdispls[k]*scale, k, disp, recvcounts[k]*scale, op);
+            for (op = 0; op < p->max_concurrent_ops; op++) {
+                char *sbuf = (char*)((ptrdiff_t)send_mem_chunk + buffer_size * op);
+                char *rbuf = (char*)((ptrdiff_t)recv_mem_chunk + buffer_size * op);
+                check_sbuffer(sbuf, p->myrank, op);
+                for (k = 0; k < p->nranks; k++) {
+                    disp = 0;
+                    for (j = 0; j < p->myrank; j++) { disp += ((j+k)*chunksize) % (p->size+1); }
+                    check_rbuffer(rbuf, rdispls[k]*scale, k, disp, recvcounts[k]*scale, op);
+                }
             }
         }
     }
