@@ -1,4 +1,5 @@
 /*
+Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
 Copyright (c) 2007-2008, Lawrence Livermore National Security (LLNS), LLC
 Produced at the Lawrence Livermore National Laboratory (LLNL)
 Written by Adam Moody <moody20@llnl.gov>.
@@ -11,15 +12,15 @@ Please also read the Additional BSD Notice below.
 
 Redistribution and use in source and binary forms, with or without modification,
 are permitted provided that the following conditions are met:
-â* Redistributions of source code must retain the above copyright notice, this
+ï¿½* Redistributions of source code must retain the above copyright notice, this
    list of conditions and the disclaimer below.
-â* Redistributions in binary form must reproduce the above copyright notice,
+ï¿½* Redistributions in binary form must reproduce the above copyright notice,
    this list of conditions and the disclaimer (as noted below) in the documentation
    and/or other materials provided with the distribution.
-â* Neither the name of the LLNL nor the names of its contributors may be used to
+ï¿½* Neither the name of the LLNL nor the names of its contributors may be used to
    endorse or promote products derived from this software without specific prior
    written permission.
-â* 
+ï¿½* 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
@@ -63,6 +64,7 @@ Comiple flags:
 #include <sys/time.h>
 #include <mpi.h>
 #include <math.h>
+#include <stddef.h>
 
 #if 0
 #ifndef _AIX
@@ -110,13 +112,14 @@ Globals
 #define ALLTOALLV  (0x100)
 #define ALLGATHERV (0x200)
 #define GATHERV    (0x400)
-#define NUM_TESTS  (11)
+#define IALLTOALLV (0x500)
+#define NUM_TESTS  (12)
 
 char* TEST_NAMES[] = {
-  "Barrier", "Bcast", "Alltoall", "Allgather", "Gather", "Scatter", "Allreduce", "Reduce", "Alltoallv", "Allgatherv", "Gatherv"
+  "Barrier", "Bcast", "Alltoall", "Allgather", "Gather", "Scatter", "Allreduce", "Reduce", "Alltoallv", "Allgatherv", "Gatherv", "Ialltoallv",
 };
 int   TEST_FLAGS[] = {
-   BARRIER,   BCAST,   ALLTOALL,   ALLGATHER,   GATHER,   SCATTER,   ALLREDUCE,   REDUCE,   ALLTOALLV,   ALLGATHERV,   GATHERV
+   BARRIER,   BCAST,   ALLTOALL,   ALLGATHER,   GATHER,   SCATTER,   ALLREDUCE,   REDUCE,   ALLTOALLV,   ALLGATHERV,   GATHERV, IALLTOALLV,
 };
   
 int rank_local; /* my MPI rank */
@@ -145,6 +148,7 @@ int usage()
         printf("    -t <usec>  Time limit for any single test in microseconds (default 0 = infinity)\n");
         printf("    -d <ndim>  Number of Cartesian dimensions to split processes in (default 0 = MPI_COMM_WORLD only)\n");
         printf("    -p <size>  Minimum partition size (number of ranks) to divide MPI_COMM_WORLD by\n");
+        printf("    -o <nops>  Number of concurrent non-blocking operations\n");
         printf("    -c         Check receive buffer for expected data in last interation (default disabled)\n");
         printf("    -C         Check receive buffer for expected data every iteration (default disabled)\n");
         printf("    -h         Print this help screen and exit\n");
@@ -153,7 +157,7 @@ int usage()
         printf("  Operations:\n");
         printf("    Barrier\n");
         printf("    Bcast\n");
-        printf("    Alltoall, Alltoallv\n");
+        printf("    Alltoall, Alltoallv, Ialltoallv\n");
         printf("    Allgather, Allgatherv\n");
         printf("    Gather, Gatherv\n");
         printf("    Scatter\n");
@@ -296,7 +300,7 @@ double Print_Timings(double value, char* title, size_t bytes, int iters, MPI_Com
         MPI_Comm_size(comm, &nranks);
 
         printf("%-20.20s\t", title);
-        printf("Bytes:\t%8u\tIters:\t%7d\t", bytes, iters);
+        printf("Bytes:\t%8lu\tIters:\t%7d\t", bytes, iters);
         printf("Avg:\t%8.4f\tMin:\t%8.4f\tMax:\t%8.4f\t", avg, min, max);
         printf("Comm: %s\tRanks: %d\n", str, nranks);
         fflush(stdout);
@@ -334,6 +338,7 @@ struct argList {
     int    checkEvery;
     int    ndims;
     int    partSize;
+    int    nops;
 };
 
 int processArgs(int argc, char **argv, struct argList* args)
@@ -353,6 +358,7 @@ int processArgs(int argc, char **argv, struct argList* args)
   args->checkEvery = 0;
   args->ndims      = 0;
   args->partSize   = 0;
+  args->nops       = 1;
 
   int iters_set = 0;
   int time_set  = 0;
@@ -381,7 +387,7 @@ int processArgs(int argc, char **argv, struct argList* args)
       }
       
       /* check that we've got a valid option */
-      if (!strchr("beithmdp", flag))
+      if (!strchr("beithmdpo", flag))
       {
         printf("\nInvalid flag -%c\n", flag);
         return(0);
@@ -420,6 +426,9 @@ int processArgs(int argc, char **argv, struct argList* args)
       case 'p':
         args->partSize = atoi(argptr);
         break;
+      case 'o':
+        args->nops = atoi(argptr);
+        break;
       default:
         return(0);
       }
@@ -448,47 +457,47 @@ int processArgs(int argc, char **argv, struct argList* args)
 }
 
 /* fill the send buffer with a known pattern */
-void init_sbuffer(int rank)
+void init_sbuffer(char *sbuf, int rank, const int seed)
 {
     size_t i;
     char value;
     for(i=0; i<buffer_size; i++) {
-        value = (char) ((i+1)*(rank+1) + i);
-        sbuffer[i] = value;
+        value = (char) ((i+1)*(rank+seed+1) + i);
+        sbuf[i] = value;
     }
 }
 
 /* fill the receive buffer with a known pattern */
-void init_rbuffer(int rank)
+void init_rbuffer(char *rbuf, int rank)
 {
     /* nothing fancy here -- just blank it out */
-    memset(rbuffer, 0, buffer_size);
+    memset(rbuf, 0, buffer_size);
 }
 
 /* check the send buffer for any deviation from expected pattern */
-void check_sbuffer(int rank)
+void check_sbuffer(char *buf, int rank, const int seed)
 {
     size_t i;
     char value;
     for(i=0; i<buffer_size; i++) {
-        value = (char) ((i+1)*(rank+1) + i);
-        if (sbuffer[i] != value) {
-            printf("Send buffer corruption detected on rank %d at sbuffer[%d]\n", rank, i);
+        value = (char) ((i+1)*(rank+seed+1) + i);
+        if (buf[i] != value) {
+            printf("Send buffer corruption detected on rank %d at sbuffer[%ld]\n", rank, i);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
 }
 
 /* check the receive buffer for any deviation from expected pattern */
-void check_rbuffer(char* buffer, size_t byte_offset, int rank, size_t src_byte_offset, size_t element_count)
+void check_rbuffer(char* buffer, size_t byte_offset, int rank, size_t src_byte_offset, size_t element_count, const int seed)
 {
     size_t i, j;
     char value;
     buffer += byte_offset;
     for(i=0, j=src_byte_offset; i<element_count; i++, j++) {
-        value = (char) ((j+1)*(rank+1) + j);
+        value = (char) ((j+1)*(rank+seed+1) + j);
         if (buffer[i] != value) {
-              printf("Receive buffer corruption detected on rank %d at rbuffer[%d] from rank %d\n", rank_local, byte_offset+i, rank);
+              printf("Receive buffer corruption detected on rank %d at rbuffer[%ld] from rank %d\n", rank_local, byte_offset+i, rank);
               MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
@@ -504,6 +513,7 @@ struct collParams {
     int      count;    /* element count for collective */
     MPI_Datatype type; /* MPI_Datatype to be used in collective (assumed contiguous) */
     MPI_Op   reduceop; /* MPI_Reduce operation to be used */
+    int      max_concurrent_ops; /* For non-blocking MPI operations, the number of concurrent operations */
 };
 
 double time_barrier(struct collParams* p)
@@ -525,21 +535,22 @@ double time_bcast(struct collParams* p)
     int i;
     char* buffer = (p->myrank == p->root) ? sbuffer : rbuffer;
     MPI_Barrier(MPI_COMM_WORLD);
+    int seed = 0;
 
     __TIME_START__;
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-          init_sbuffer(p->myrank);
-          init_rbuffer(p->myrank);
+          init_sbuffer(sbuffer, p->myrank, seed);
+          init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Bcast(buffer, p->count, p->type, p->root, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
-            check_rbuffer(buffer, 0, p->root, 0, p->size);
+            check_sbuffer(sbuffer, p->myrank, seed);
+            check_rbuffer(buffer, 0, p->root, 0, p->size, 0);
         }
     }
     __TIME_END__;
@@ -550,23 +561,24 @@ double time_bcast(struct collParams* p)
 double time_alltoall(struct collParams* p)
 {
     int i, j;
+    int seed = 0;
     MPI_Barrier(MPI_COMM_WORLD);
 
     __TIME_START__;
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Alltoall(sbuffer, p->count, p->type, rbuffer, p->size, p->type, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
+            check_sbuffer(sbuffer, p->myrank, seed);
             for (j = 0; j < p->nranks; j++) {
-                check_rbuffer(rbuffer, j*p->size, j, p->myrank*p->size, p->size);
+                check_rbuffer(rbuffer, j*p->size, j, p->myrank*p->size, p->size, seed);
             }
         }
     }
@@ -579,6 +591,7 @@ double time_alltoallv(struct collParams* p)
 {
     int i, j, k, count;
     int disp = 0;
+    int seed = 1;
     int chunksize = p->count / p->nranks;
     if (chunksize == 0) { chunksize = 1; }
     for (i = 0; i < p->nranks; i++) {
@@ -596,19 +609,19 @@ double time_alltoallv(struct collParams* p)
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Alltoallv(sbuffer, sendcounts, sdispls, p->type, rbuffer, recvcounts, rdispls, p->type, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
+            check_sbuffer(sbuffer, p->myrank, seed);
             for (k = 0; k < p->nranks; k++) {
                 disp = 0;
                 for (j = 0; j < p->myrank; j++) { disp += ((j+k)*chunksize) % (p->size+1); }
-                check_rbuffer(rbuffer, rdispls[k]*scale, k, disp, recvcounts[k]*scale);
+                check_rbuffer(rbuffer, rdispls[k]*scale, k, disp, recvcounts[k]*scale, seed);
             }
         }
     }
@@ -617,26 +630,117 @@ double time_alltoallv(struct collParams* p)
     return __TIME_USECS__ / (double)p->iter;
 }
 
+double time_ialltoallv(struct collParams* p)
+{
+    int i, j, k, count;
+    int disp = 0;
+    int chunksize = p->count / p->nranks;
+    if (chunksize == 0) { chunksize = 1; }
+    for (i = 0; i < p->nranks; i++) {
+        int count = ((i+p->myrank)*chunksize) % (p->count+1);
+        sendcounts[i] = count;
+        recvcounts[i] = count;
+        sdispls[i] = disp;
+        rdispls[i] = disp;
+        disp += count;
+    }
+    size_t scale = (p->count > 0) ? (p->size/p->count) : 0;
+    char *send_mem_chunk = (char*) _ALLOC_MAIN_(buffer_size * p->max_concurrent_ops, "Send memory chunks for all the ialltoallv concurrent send operations");
+    if (send_mem_chunk == NULL)
+    {
+        fprintf(stderr, "unable to allocate send buffers for ialltoallv operations\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    char *recv_mem_chunk = (char*) _ALLOC_MAIN_(buffer_size * p->max_concurrent_ops, "Send memory chunks for all the ialltoallv concurrent send operations");
+    if (recv_mem_chunk == NULL)
+    {
+        free(send_mem_chunk);
+        fprintf(stderr, "unable to allocate recv buffers for ialltoallv operations\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    MPI_Request *requests = (MPI_Request*)calloc(p->max_concurrent_ops, sizeof(MPI_Request));
+    if (requests == NULL)
+    {
+        free(send_mem_chunk);
+        free(recv_mem_chunk);
+        fprintf(stderr, "unable to allocate array for MPI requests for ialltoallv operations\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    MPI_Status *statuses = (MPI_Status*)calloc(p->max_concurrent_ops, sizeof(MPI_Status));
+    if (statuses == NULL)
+    {
+        free(send_mem_chunk);
+        free(recv_mem_chunk);
+        free(requests);
+        fprintf(stderr, "unable to allocate array for MPI statuses for ialltoallv operations\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    __TIME_START__;
+    for (i = 0; i < p->iter; i++) {
+        int check = (check_every || (check_once && i == p->iter-1));
+        int op;
+        for (op = 0; op < p->max_concurrent_ops; op++) {
+            char *sbuf = (char*)((ptrdiff_t)send_mem_chunk + buffer_size * op);
+            char *rbuf = (char*)((ptrdiff_t)recv_mem_chunk + buffer_size * op);
+            MPI_Request req = requests[op];
+            if (check) {
+                init_sbuffer(sbuf, p->myrank, op);
+                init_rbuffer(rbuf, p->myrank);
+            }
+
+            MPI_Ialltoallv(sbuf, sendcounts, sdispls, p->type, rbuf, recvcounts, rdispls, p->type, p->comm, &req);
+        }
+
+        MPI_Waitall(p->max_concurrent_ops, requests, statuses);
+        __BAR__(p->comm);
+
+        if (check) {
+            check_sbuffer(sbuffer, p->myrank, op);
+            for (k = 0; k < p->nranks; k++) {
+                disp = 0;
+                for (j = 0; j < p->myrank; j++) { disp += ((j+k)*chunksize) % (p->size+1); }
+                check_rbuffer(rbuffer, rdispls[k]*scale, k, disp, recvcounts[k]*scale, op);
+            }
+        }
+    }
+    __TIME_END__;
+
+    free(send_mem_chunk);
+    send_mem_chunk = NULL;
+    free(recv_mem_chunk);
+    recv_mem_chunk = NULL;
+    free(requests);
+    requests = NULL;
+    free(statuses);
+    statuses = NULL;
+
+    return __TIME_USECS__ / (double)p->iter;
+}
+
 double time_allgather(struct collParams* p)
 {
     int i, j;
+    int seed = 0;
     MPI_Barrier(MPI_COMM_WORLD);
 
     __TIME_START__;
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Allgather(sbuffer, p->count, p->type, rbuffer, p->count, p->type, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
+            check_sbuffer(sbuffer, p->myrank, seed);
             for (j = 0; j < p->nranks; j++) {
-                check_rbuffer(rbuffer, j*p->size, j, 0, p->size);
+                check_rbuffer(rbuffer, j*p->size, j, 0, p->size, seed);
             }
         }
     }
@@ -649,6 +753,7 @@ double time_allgatherv(struct collParams* p)
 {
     int i, j, count;
     int disp = 0;
+    int seed = 0;
     int chunksize = p->count / p->nranks;
     if (chunksize == 0) { chunksize = 1; }
     for ( i = 0; i < p->nranks; i++) {
@@ -665,17 +770,17 @@ double time_allgatherv(struct collParams* p)
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Allgatherv(sbuffer, count, p->type, rbuffer, recvcounts, rdispls, p->type, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
+            check_sbuffer(sbuffer, p->myrank, seed);
             for (j = 0; j < p->nranks; j++) {
-                check_rbuffer(rbuffer, rdispls[j]*scale, j, 0, recvcounts[j]*scale);
+                check_rbuffer(rbuffer, rdispls[j]*scale, j, 0, recvcounts[j]*scale, seed);
             }
         }
     }
@@ -687,24 +792,25 @@ double time_allgatherv(struct collParams* p)
 double time_gather(struct collParams* p)
 {
     int i, j;
+    const int seed = 0;
     MPI_Barrier(MPI_COMM_WORLD);
 
     __TIME_START__;
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Gather(sbuffer, p->count, p->type, rbuffer, p->count, p->type, p->root, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
+            check_sbuffer(sbuffer, p->myrank, seed);
             if (p->myrank == p->root) {
                 for (j = 0; j < p->nranks; j++) {
-                    check_rbuffer(rbuffer, j*p->size, j, 0, p->size);
+                    check_rbuffer(rbuffer, j*p->size, j, 0, p->size, seed);
                 }
             }
         }
@@ -718,6 +824,7 @@ double time_gatherv(struct collParams* p)
 {
     int i, j, count;
     int disp = 0;
+    const int seed = 0;
     int chunksize = p->count / p->nranks;
     if (chunksize == 0) { chunksize = 1; }
     for ( i = 0; i < p->nranks; i++) {
@@ -734,18 +841,18 @@ double time_gatherv(struct collParams* p)
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Gatherv(sbuffer, count, p->type, rbuffer, recvcounts, rdispls, p->type, p->root, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
+            check_sbuffer(sbuffer, p->myrank, seed);
             if (p->myrank == p->root) {
                 for (j = 0; j < p->nranks; j++) {
-                    check_rbuffer(rbuffer, rdispls[j]*scale, j, 0, recvcounts[j]*scale);
+                    check_rbuffer(rbuffer, rdispls[j]*scale, j, 0, recvcounts[j]*scale, seed);
                 }
             }
         }
@@ -758,22 +865,23 @@ double time_gatherv(struct collParams* p)
 double time_scatter(struct collParams* p)
 {
     int i;
+    const int seed = 0;
     MPI_Barrier(MPI_COMM_WORLD);
 
     __TIME_START__;
     for (i = 0; i < p->iter; i++) {
         int check = (check_every || (check_once && i == p->iter-1));
         if (check) {
-            init_sbuffer(p->myrank);
-            init_rbuffer(p->myrank);
+            init_sbuffer(sbuffer, p->myrank, seed);
+            init_rbuffer(rbuffer, p->myrank);
         }
 
         MPI_Scatter(sbuffer, p->count, p->type, rbuffer, p->count, p->type, p->root, p->comm);
         __BAR__(p->comm);
 
         if (check) {
-            check_sbuffer(p->myrank);
-            check_rbuffer(rbuffer, 0, p->root, p->myrank*p->size, p->size);
+            check_sbuffer(sbuffer, p->myrank, seed);
+            check_rbuffer(rbuffer, 0, p->root, p->myrank*p->size, p->size, seed);
         }
     }
     __TIME_END__;
@@ -820,10 +928,11 @@ double get_time(double (*fn)(struct collParams* p), char* title, struct collPara
     double time;
     double time_avg;
     int iter_limit;
+    const int seed = 0;
 
     /* initialize the send and receive buffer with something */
-    init_sbuffer(p->myrank);
-    init_rbuffer(p->myrank);
+    init_sbuffer(sbuffer, p->myrank, seed);
+    init_rbuffer(rbuffer, p->myrank);
 
     /* prime the collective with an intial call */
     p->iter = 1;
@@ -861,7 +970,7 @@ int main (int argc, char *argv[])
 
     int iter, iter_limit;
     size_t size, messStart, messStop, mem_limit;
-    int testFlags, ndims, partsize;
+    int testFlags, ndims, partsize, nops;
     int k;
 
     char  hostname[256];
@@ -881,7 +990,8 @@ int main (int argc, char *argv[])
     check_once  = args.checkOnce;
     check_every = args.checkEvery;
     ndims       = args.ndims;
-    partsize    = args.partSize; 
+    partsize    = args.partSize;
+    nops        = args.nops;
 
     /* initialize MPI */
     err = MPI_Init(&argc, &argv);
@@ -904,7 +1014,7 @@ int main (int argc, char *argv[])
         }
     }
 
-    /* allocate message buffers and initailize timing functions */
+    /* allocate message buffers and initialize timing functions */
     while(messStop*((size_t)rank_count)*2 > mem_limit && messStop > 0) messStop /= 2;
     buffer_size = messStop * rank_count;
     sbuffer   = (char*) _ALLOC_MAIN_(messStop    * rank_count, "Send Buffer");
@@ -1013,6 +1123,7 @@ int main (int argc, char *argv[])
         p.myrank = myrank;
         p.nranks = nranks;
         p.type   = MPI_BYTE;
+        p.max_concurrent_ops = nops;
 
         /* time requested collectives */
         if(testFlags & BARRIER) {
@@ -1039,6 +1150,13 @@ int main (int argc, char *argv[])
             for(p.size = messStart; p.size <= messStop; p.size = (p.size > 0) ? p.size << 1 : 1) {
                 p.count = p.size;
                 if(get_time(time_alltoallv, "Alltoallv", &p, iter, time_limit) > time_maxMsg && time_maxMsg > 0.0) break;
+            }
+        }
+
+        if(testFlags & IALLTOALLV) {
+            for(p.size = messStart; p.size <= messStop; p.size = (p.size > 0) ? p.size << 1 : 1) {
+                p.count = p.size;
+                if(get_time(time_alltoallv, "Ialltoallv", &p, iter, time_limit) > time_maxMsg && time_maxMsg > 0.0) break;
             }
         }
 
